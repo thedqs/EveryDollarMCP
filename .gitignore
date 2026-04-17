@@ -1,0 +1,27 @@
+# Build output
+bin/
+obj/
+publish/
+
+# User-specific files
+*.user
+*.suo
+*.userprefs
+
+# IDE
+.vs/
+.vscode/
+*.sln.docstates
+
+# NuGet
+*.nupkg
+**/packages/
+
+# OS files
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.DS_Store
+
+# Playwright
+playwright/.cache/
