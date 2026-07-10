@@ -2,12 +2,14 @@ using System.Net;
 using System.Net.Http.Json;
 using System.Text;
 using System.Text.Json;
+using EveryDollarMCP;
 using EveryDollarMCP.Models;
 using Microsoft.Playwright;
 
 /// <summary>
 /// HTTP client for the EveryDollar API. Uses cookie-based session auth
 /// obtained via OAuth2 login through Ramsey Solutions identity provider.
+/// Credentials are persisted locally with DPAPI encryption and restored on startup.
 /// </summary>
 public sealed class EveryDollarApiClient
 {
@@ -41,9 +43,55 @@ public sealed class EveryDollarApiClient
         _httpClient = new HttpClient(handler);
         _httpClient.DefaultRequestHeaders.Add("User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36");
+
+        // Attempt to restore cached credentials from encrypted local store
+        TryRestoreCachedCredentials();
     }
 
     public bool IsAuthenticated => _isAuthenticated;
+
+    /// <summary>
+    /// Attempts to load previously saved credentials from the encrypted local store.
+    /// </summary>
+    private void TryRestoreCachedCredentials()
+    {
+        var cached = CredentialStore.Load();
+        if (cached is null)
+            return;
+
+        _csrfToken = cached.CsrfToken;
+        foreach (var cookiePart in cached.SessionCookie.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eqIndex = cookiePart.IndexOf('=');
+            if (eqIndex > 0)
+            {
+                var name = cookiePart[..eqIndex].Trim();
+                var value = cookiePart[(eqIndex + 1)..].Trim();
+                _cookieContainer.Add(new Uri("https://www.everydollar.com"), new System.Net.Cookie(name, value));
+            }
+        }
+        _isAuthenticated = true;
+    }
+
+    /// <summary>
+    /// Saves current credentials to the encrypted local store.
+    /// </summary>
+    private void PersistCredentials(string csrfToken, string sessionCookie, DateTime? expiresAtUtc = null)
+    {
+        // Default to 7-day expiry if no explicit expiration is provided
+        var expiry = expiresAtUtc ?? DateTime.UtcNow.AddDays(7);
+        CredentialStore.Save(csrfToken, sessionCookie, expiry);
+    }
+
+    /// <summary>
+    /// Invalidates cached credentials when the server rejects them (401/403).
+    /// </summary>
+    private void InvalidateCachedCredentials()
+    {
+        _isAuthenticated = false;
+        _csrfToken = null;
+        CredentialStore.Clear();
+    }
 
     /// <summary>
     /// Manually sets session cookies and CSRF token. Use when the browser console
@@ -66,7 +114,8 @@ public sealed class EveryDollarApiClient
         }
 
         _isAuthenticated = true;
-        return "Session configured manually. Try calling get_budget to verify.";
+        PersistCredentials(csrfToken, sessionCookie);
+        return "Session configured manually and saved to encrypted local store. Try calling get_budget to verify.";
     }
 
     /// <summary>
@@ -168,10 +217,16 @@ public sealed class EveryDollarApiClient
         _cookieContainer.Add(new Uri("https://www.everydollar.com"), new System.Net.Cookie("SESSION", sessionCookie.Value));
         _isAuthenticated = true;
 
+        // Persist credentials to encrypted local store
+        var expiry = sessionCookie.Expires > 0
+            ? DateTimeOffset.FromUnixTimeSeconds((long)sessionCookie.Expires).UtcDateTime
+            : (DateTime?)null;
+        PersistCredentials(csrf, $"SESSION={sessionCookie.Value}", expiry);
+
         await context.CloseAsync();
         playwright.Dispose();
 
-        return $"Login successful via {browserName}! SESSION cookie and CSRF token captured.";
+        return $"Login successful via {browserName}! SESSION cookie and CSRF token captured and saved to encrypted local store.";
     }
 
     /// <summary>
@@ -228,6 +283,7 @@ public sealed class EveryDollarApiClient
     /// <summary>
     /// Sends a request and returns the response body as a string.
     /// Throws HttpRequestException with the API error body on failure.
+    /// Invalidates cached credentials on 401/403 responses.
     /// </summary>
     private async Task<string> SendAndReadAsync(HttpRequestMessage request)
     {
@@ -235,6 +291,10 @@ public sealed class EveryDollarApiClient
         var body = await response.Content.ReadAsStringAsync();
         if (!response.IsSuccessStatusCode)
         {
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                InvalidateCachedCredentials();
+            }
             throw new HttpRequestException(
                 $"API returned {(int)response.StatusCode} {response.StatusCode}: {body[..Math.Min(500, body.Length)]}");
         }
@@ -254,12 +314,17 @@ public sealed class EveryDollarApiClient
     /// <summary>
     /// Sends a request and throws HttpRequestException with the API error body on failure.
     /// Does not read or return the response body on success.
+    /// Invalidates cached credentials on 401/403 responses.
     /// </summary>
     private async Task SendAsync(HttpRequestMessage request)
     {
         var response = await _httpClient.SendAsync(request);
         if (!response.IsSuccessStatusCode)
         {
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+            {
+                InvalidateCachedCredentials();
+            }
             var body = await response.Content.ReadAsStringAsync();
             throw new HttpRequestException(
                 $"API returned {(int)response.StatusCode} {response.StatusCode}: {body[..Math.Min(500, body.Length)]}");

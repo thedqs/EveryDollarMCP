@@ -6,7 +6,7 @@ using ModelContextProtocol.Server;
 [McpServerToolType]
 public static class AuthTools
 {
-    [McpServerTool, Description("Log in to EveryDollar by opening a browser window. You'll see a browser open — log in normally (or let saved credentials auto-fill). The tool captures the session automatically once login completes. Times out after 2 minutes. Auto-detects Edge or Chrome; specify browser to override.")]
+    [McpServerTool, Description("Log in to EveryDollar by opening a browser window. You'll see a browser open — log in normally (or let saved credentials auto-fill). The tool captures the session automatically once login completes. Times out after 2 minutes. Auto-detects Edge or Chrome; specify browser to override. Credentials are encrypted and cached locally — you won't need to re-login unless the session expires.")]
     public static async Task<string> Login(
         EveryDollarApiClient client,
         [Description("Optional: 'edge' or 'chrome'. Auto-detects if omitted.")] string? browser = null)
@@ -21,7 +21,7 @@ public static class AuthTools
         }
     }
 
-    [McpServerTool, Description("Set up authentication by providing a CSRF token and session cookie from the EveryDollar web app. Open EveryDollar in your browser, then: 1) Get CSRF token from browser console: window._CSRF, 2) Get SESSION cookie from DevTools > Application > Cookies.")]
+    [McpServerTool, Description("Set up authentication by providing a CSRF token and session cookie from the EveryDollar web app. Open EveryDollar in your browser, then: 1) Get CSRF token from browser console: window._CSRF, 2) Get SESSION cookie from DevTools > Application > Cookies. Credentials are encrypted and cached locally for future sessions.")]
     public static string SetSessionCookie(
         EveryDollarApiClient client,
         [Description("CSRF token from browser console: window._CSRF")] string csrfToken,

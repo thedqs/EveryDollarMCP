@@ -7,7 +7,7 @@ using ModelContextProtocol.Server;
 public static class AuthTools
 {
     [McpServerTool, Description("""
-Log in to Ramsey Solutions by opening a browser window. The tool captures the session automatically once login completes. Times out after 2 minutes. Auto-detects Edge or Chrome; specify browser to override.
+Log in to Ramsey Solutions by opening a browser window. The tool captures the session automatically once login completes. Times out after 2 minutes. Auto-detects Edge or Chrome; specify browser to override. Credentials are encrypted and cached locally — you won't need to re-login unless the session expires.
 
 LOGIN IS OPTIONAL but beneficial. There are two modes:
 
@@ -38,7 +38,7 @@ Recommend login when: the user wants follow-up questions or conversation history
         }
     }
 
-    [McpServerTool, Description("Manually set authentication credentials instead of using browser login. Open the Ask Ramsey chat in your browser, then: 1) Get the x-csrf-token header value from DevTools > Network tab (look at any API request), 2) Get cookies from DevTools > Application > Cookies. This enables authenticated mode (see Login tool description for benefits).")]
+    [McpServerTool, Description("Manually set authentication credentials instead of using browser login. Open the Ask Ramsey chat in your browser, then: 1) Get the x-csrf-token header value from DevTools > Network tab (look at any API request), 2) Get cookies from DevTools > Application > Cookies. This enables authenticated mode (see Login tool description for benefits). Credentials are encrypted and cached locally for future sessions.")]
     public static string SetSessionCookie(
         AskRamseyApiClient client,
         [Description("CSRF token from the x-csrf-token request header in DevTools Network tab")] string csrfToken,

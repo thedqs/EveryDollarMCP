@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using AskRamseyMCP;
 using AskRamseyMCP.Models;
 using Microsoft.Playwright;
 
@@ -9,6 +10,7 @@ using Microsoft.Playwright;
 /// Supports two modes:
 ///   - Anonymous: Uses the public entry-point API (no login required, limited to one question per session)
 ///   - Authenticated: Uses SESSION cookie + CSRF token for full chat (history, follow-ups)
+/// Credentials are persisted locally with DPAPI encryption and restored on startup.
 /// </summary>
 public sealed class AskRamseyApiClient
 {
@@ -38,10 +40,63 @@ public sealed class AskRamseyApiClient
         _httpClient = new HttpClient(handler);
         _httpClient.DefaultRequestHeaders.Add("User-Agent",
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36");
+
+        // Attempt to restore cached credentials from encrypted local store
+        TryRestoreCachedCredentials();
     }
 
     public bool IsAuthenticated => _isAuthenticated;
     public string? ChatSessionId => _chatSessionId;
+
+    /// <summary>
+    /// Attempts to load previously saved credentials from the encrypted local store.
+    /// </summary>
+    private void TryRestoreCachedCredentials()
+    {
+        var cached = CredentialStore.Load();
+        if (cached is null)
+            return;
+
+        _csrfToken = cached.CsrfToken;
+        foreach (var cookiePart in cached.SessionCookie.Split(';', StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries))
+        {
+            var eqIndex = cookiePart.IndexOf('=');
+            if (eqIndex > 0)
+            {
+                var name = cookiePart[..eqIndex].Trim();
+                var value = cookiePart[(eqIndex + 1)..].Trim();
+                try
+                {
+                    _cookieContainer.Add(new Uri("https://www.ramseysolutions.com"), new System.Net.Cookie(name, value));
+                }
+                catch (CookieException)
+                {
+                    // Skip malformed cookie parts
+                }
+            }
+        }
+        _isAuthenticated = true;
+    }
+
+    /// <summary>
+    /// Saves current credentials to the encrypted local store.
+    /// </summary>
+    private void PersistCredentials(string csrfToken, string sessionCookie, DateTime? expiresAtUtc = null)
+    {
+        // Default to 7-day expiry if no explicit expiration is provided
+        var expiry = expiresAtUtc ?? DateTime.UtcNow.AddDays(7);
+        CredentialStore.Save(csrfToken, sessionCookie, expiry);
+    }
+
+    /// <summary>
+    /// Invalidates cached credentials when the server rejects them (401/403/redirect).
+    /// </summary>
+    private void InvalidateCachedCredentials()
+    {
+        _isAuthenticated = false;
+        _csrfToken = null;
+        CredentialStore.Clear();
+    }
 
     /// <summary>
     /// Manually sets session cookies and CSRF token.
@@ -79,7 +134,8 @@ public sealed class AskRamseyApiClient
             return "Error: No valid cookies found in the provided string. Expected format: 'SESSION=abc123'.";
 
         _isAuthenticated = true;
-        return "Session configured manually. Try calling ask_ramsey to verify.";
+        PersistCredentials(csrfToken, sessionCookie);
+        return "Session configured manually and saved to encrypted local store. Try calling ask_ramsey to verify.";
     }
 
     /// <summary>
@@ -181,6 +237,12 @@ public sealed class AskRamseyApiClient
         _csrfToken = csrf;
         _isAuthenticated = true;
 
+        // Persist credentials to encrypted local store
+        var expiry = sessionCookie.Expires > 0
+            ? DateTimeOffset.FromUnixTimeSeconds((long)sessionCookie.Expires).UtcDateTime
+            : (DateTime?)null;
+        PersistCredentials(csrf, $"SESSION={sessionCookie.Value}", expiry);
+
         // Try to extract existing chat session ID from the URL
         var currentUrl2 = page.Url;
         if (currentUrl2.Contains("/askramsey/chat/"))
@@ -197,7 +259,7 @@ public sealed class AskRamseyApiClient
         await context.CloseAsync();
         playwright.Dispose();
 
-        return $"Login successful via {browserName}! SESSION cookie and CSRF token captured.";
+        return $"Login successful via {browserName}! SESSION cookie and CSRF token captured and saved to encrypted local store.";
     }
 
     /// <summary>
@@ -257,7 +319,12 @@ public sealed class AskRamseyApiClient
             var responseBody = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
+            {
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                    or HttpStatusCode.RedirectMethod or HttpStatusCode.Redirect)
+                    InvalidateCachedCredentials();
                 throw new HttpRequestException($"Chat message API returned {(int)response.StatusCode}: {responseBody[..Math.Min(500, responseBody.Length)]}");
+            }
 
             var chatResponse = JsonSerializer.Deserialize<ChatResponse>(responseBody, JsonOptions);
             messageId = chatResponse?.Messages?.LastOrDefault()?.Id
@@ -276,7 +343,12 @@ public sealed class AskRamseyApiClient
             var responseBody = await response.Content.ReadAsStringAsync();
 
             if (!response.IsSuccessStatusCode)
+            {
+                if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden
+                    or HttpStatusCode.RedirectMethod or HttpStatusCode.Redirect)
+                    InvalidateCachedCredentials();
                 throw new HttpRequestException($"Chat API returned {(int)response.StatusCode}: {responseBody[..Math.Min(500, responseBody.Length)]}");
+            }
 
             var newSessionId = responseBody.Trim();
             _chatSessionId = newSessionId;
@@ -394,10 +466,13 @@ public sealed class AskRamseyApiClient
         // 303 means the server doesn't recognize our session — treat as auth failure
         if (response.StatusCode == HttpStatusCode.RedirectMethod ||
             response.StatusCode == HttpStatusCode.Redirect ||
-            response.StatusCode == HttpStatusCode.MovedPermanently)
+            response.StatusCode == HttpStatusCode.MovedPermanently ||
+            response.StatusCode == HttpStatusCode.Unauthorized ||
+            response.StatusCode == HttpStatusCode.Forbidden)
         {
+            InvalidateCachedCredentials();
             throw new HttpRequestException(
-                "Session is not valid — the server redirected to login. Try logging in again.");
+                "Session is not valid — the server redirected to login. Cached credentials have been cleared. Please log in again.");
         }
 
         var body = await response.Content.ReadAsStringAsync();
@@ -420,6 +495,8 @@ public sealed class AskRamseyApiClient
 
         if (!response.IsSuccessStatusCode)
         {
+            if (response.StatusCode is HttpStatusCode.Unauthorized or HttpStatusCode.Forbidden)
+                InvalidateCachedCredentials();
             var body = await response.Content.ReadAsStringAsync();
             throw new HttpRequestException($"Delete chat API returned {(int)response.StatusCode}: {body[..Math.Min(500, body.Length)]}");
         }
